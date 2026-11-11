@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  @apply bg-paper text-ink antialiased;
+}
+
+/* Old-style figures where the reference proposal uses them: dates and money
+   set in the display face. The brand faces carry the feature, so this is the
+   document's typography rather than a decoration. */
+.oldstyle {
+  font-variant-numeric: oldstyle-nums;
+}
+
+/* Print. A client prints their itinerary and takes it to the airport, and
+   that is the copy they have when there is no signal at the gate -- so it is
+   a real view, not an afterthought. */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  html,
+  body {
+    background: #fff;
+  }
+  .print-open {
+    break-inside: avoid;
+  }
+}

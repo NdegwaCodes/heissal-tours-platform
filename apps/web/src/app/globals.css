@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  @apply bg-paper text-ink antialiased;
+}
+
+.oldstyle {
+  font-variant-numeric: oldstyle-nums;
+}
+
+/* The hero slideshow's left intro re-runs this each time the active
+   destination changes, so the new copy rises in rather than snapping. */
+@keyframes heroFadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.hero-fade {
+  animation: heroFadeUp 0.5s ease both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .hero-fade {
+    animation: none;
+  }
+}
+
+/* Interaction polish for the home artboard, which is inline-styled HTML and so
+   cannot carry :hover rules of its own. .scp2 is the two primary CTA buttons;
+   .sc-card is the itinerary / destination cards (a subtle lift plus the classic
+   slow image zoom, which the cards' overflow:hidden crops cleanly). */
+.scp2,
+.scp1 {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.scp2:hover,
+.scp1:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px rgba(16, 14, 11, 0.18);
+}
+.sc-card {
+  transition: transform 0.25s ease;
+}
+.sc-card:hover {
+  transform: translateY(-4px);
+}
+.sc-card img {
+  transition: transform 0.6s ease;
+}
+.sc-card:hover img {
+  transform: scale(1.045);
+}
+@media (prefers-reduced-motion: reduce) {
+  .scp2,
+  .scp1,
+  .sc-card,
+  .sc-card img {
+    transition: none;
+  }
+  .scp2:hover,
+  .scp1:hover,
+  .sc-card:hover,
+  .sc-card:hover img {
+    transform: none;
+  }
+}
+
+/* The design markup references the brand faces by name; alias those names to
+   the self-hosted woff2 (copied to /public/fonts) so its inline styles resolve. */
+@font-face{font-family:'Cormorant Garamond';src:url('/fonts/cormorant-garamond-normal.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:'Cormorant Garamond';src:url('/fonts/cormorant-garamond-italic.woff2') format('woff2');font-weight:400;font-style:italic;font-display:swap}
+@font-face{font-family:'Libre Franklin';src:url('/fonts/libre-franklin-normal.woff2') format('woff2');font-weight:400 600;font-style:normal;font-display:swap}

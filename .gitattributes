@@ -1,0 +1,25 @@
+# Line-ending policy for the repo.
+# Text files are stored and checked out as LF everywhere, so a Windows
+# checkout stops showing every file as "modified" and Linux CI (shell
+# scripts, tooling) gets the LF it expects.
+* text=auto eol=lf
+
+# Windows-only scripts, if any are ever added, keep CRLF.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binaries: never touch these.
+*.woff2 binary
+*.woff  binary
+*.ttf   binary
+*.otf   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.bundle binary

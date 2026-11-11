@@ -1,0 +1,932 @@
+{#
+  The quotation document (design doc §3.11), section by section against the
+  reference proposal.
+
+  TYPE. Cormorant Garamond for display, Libre Franklin for body — the brand
+  faces, confirmed 2026-08-25. They are reached only through --font-display and
+  --font-body, and NOTHING ELSE IN THIS TEMPLATE MAY NAME A FONT. That rule is
+  what made replacing the placeholders a two-line edit to DocumentConfig.
+
+  The faces are embedded as data URIs, not linked: the PDF path renders a local
+  file:// page, so a network font request that fails leaves the document set in
+  a fallback at different metrics with no error raised.
+
+  This template is handed a QuotationView and nothing else. That view model has
+  no field for cost, margin, supplier payments, contingency, profit or the agent
+  cover fee, so no edit here can leak one (§2).
+
+  Sections are emitted only when the quote carries their data. A proposal that
+  describes transfers the client is not getting is worse than one that says
+  nothing about them.
+#}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ view.quote_number }} — {{ view.title }}</title>
+<style>
+  /* The brand faces, embedded so the document carries its own typography. Both
+     are variable, so one file per style covers the whole weight range. */
+  {{ fonts_css | safe }}
+
+  :root {
+    /* Unescaped on purpose: HTML-escaping the quotes in a font stack yields
+       invalid CSS and drops the face. DocumentConfig restricts these two
+       values to a font-stack charset, which is what makes it safe. */
+    --font-display: {{ view.config.font_display | safe }};
+    --font-body: {{ view.config.font_body | safe }};
+
+    /* ---- Palette, read off the reference proposal ---- */
+    --paper: #fcfbf8;
+    --ink: #1c1a17;
+    --ink-soft: #3c3833;
+    --panel: #2b211a;         /* the dark blocks */
+    --panel-ink: #f7f3ec;
+    --gold: #9a7f52;          /* eyebrow labels, rules inside dark panels */
+    --gold-soft: #c3a880;
+    --cream: #f4eee2;         /* notice boxes, at-a-glance cells */
+    --cream-tint: #f8f4ec;    /* the recommended row */
+    --hairline: #e3ddd0;
+
+
+    /* ---- Type scale, from the client's specification of the reference
+       proposal (2026-08-25). Stated there in px on a 96dpi A4 artboard, so
+       every value here is that figure x 0.75. Body at 14px -> 10.5pt is what
+       confirms the artboard: 10.5pt is the print convention it lands on
+       exactly.
+
+       Note --fs-heading (42px) is LARGER than --fs-title (40px). That is not a
+       mistake to tidy: they are different page roles in the reference — a
+       section heading inside a page against the title of a comparison or
+       closing page — and the client set them that way. ---- */
+    --fs-cover:     52.5pt;  /* 70px  cover headline */
+    --fs-cover-sub: 17.25pt; /* 23px  cover italic tagline */
+    --fs-wordmark:  16.5pt;  /* 22px  brand lockup */
+    --fs-heading:   31.5pt;  /* 42px  page headings */
+    --fs-title:     30pt;    /* 40px  comparison / Wasini / closing headings */
+    --fs-property:  33pt;    /* 44px  property names */
+    --fs-stat:      18pt;    /* 24px  at-a-glance values, subheads, closing tagline */
+    --fs-card:      19.5pt;  /* 26px  index card names, contact panel name */
+    --fs-price:     28.5pt;  /* 38px  per-person figure */
+    --fs-price-sum: 22.5pt;  /* 30px  group total */
+    --fs-leg:       21pt;    /* 28px  transport leg values */
+    --fs-pax:       30pt;    /* 40px  "25 Pax" */
+    --fs-vat:       10.5pt;  /* 14px  italic VAT footnotes */
+
+    --fs-body:      10.5pt;  /* 14px  paragraphs */
+    --fs-desc:      9.75pt;  /* 13px  property descriptions, contact details */
+    --fs-note:      9.4pt;   /* 12.5px sub-notes, notice boxes */
+    --fs-tick:      9.8pt;   /* 13px  checklists */
+    --fs-value:     10.5pt;  /* 14px  spec-grid values */
+    --fs-label:     7.1pt;   /* 9.5px spec-grid labels, table headers */
+    --fs-eyebrow:   8.25pt;  /* 11px  section eyebrows */
+    --fs-table:     9pt;     /* 12px  table body */
+    --fs-chip:      6pt;     /* 8px   "Recommended" chip */
+    --fs-fine:      8.6pt;   /* 11.5px closing disclaimer */
+
+    --page-w: {{ page.width }};
+    --page-h: {{ page.height }};
+    --page-pad: 18mm;
+  }
+
+  @page { size: {{ page.css_size }}; margin: 0; }
+
+  * { box-sizing: border-box; }
+
+  html { background: #edeae3; }
+
+  body {
+    margin: 0;
+    font-family: var(--font-body);
+    font-size: var(--fs-body);
+    line-height: 1.7;
+    color: var(--ink-soft);
+    background: #edeae3;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* One .page per printed sheet. Fixed height so a print renderer and a
+     browser agree on where a page ends, rather than reflowing differently. */
+  .page {
+    position: relative;
+    width: var(--page-w);
+    min-height: var(--page-h);
+    padding: var(--page-pad);
+    margin: 0 auto 8mm;
+    background: var(--paper);
+    page-break-after: always;
+    break-after: page;
+    display: flex;
+    flex-direction: column;
+  }
+  .page:last-child { page-break-after: auto; break-after: auto; margin-bottom: 0; }
+
+  @media print {
+    html, body { background: var(--paper); }
+    .page { margin: 0; box-shadow: none; }
+  }
+  @media screen {
+    .page { box-shadow: 0 1px 12px rgba(0,0,0,.14); }
+  }
+
+  /* ---- Shared type ---- */
+  .eyebrow {
+    font-size: var(--fs-eyebrow);
+    letter-spacing: .28em;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin: 0 0 6pt;
+  }
+  h1, h2, h3 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    color: var(--ink);
+    margin: 0;
+    /* The reference proposal sets its serif numerals as text figures. */
+    font-variant-numeric: oldstyle-nums;
+    font-feature-settings: "onum" 1;
+  }
+  h1 { font-size: var(--fs-title); line-height: 1.12; letter-spacing: -.005em; }
+  h2 { font-size: var(--fs-heading); line-height: 1.16; margin-bottom: 10pt; }
+  h3 { font-size: var(--fs-stat); line-height: 1.2; }
+  p { margin: 0 0 10pt; max-width: 46em; }
+  .lede { max-width: 40em; }
+  .rule { height: 1px; background: var(--hairline); margin: 16pt 0; border: 0; }
+  .serif-note {
+    font-family: var(--font-display);
+    font-style: italic;
+    font-size: var(--fs-vat);
+    color: var(--gold);
+    font-variant-numeric: oldstyle-nums;
+  }
+  .center { text-align: center; }
+
+  /* ---- Cover ---- */
+  .masthead {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12pt;
+    padding-bottom: 10pt;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .wordmark {
+    font-family: var(--font-display);
+    font-size: var(--fs-wordmark);
+    color: var(--ink);
+    letter-spacing: .005em;
+  }
+  .hero {
+    position: relative;
+    margin-top: 14pt;
+    flex: 1 1 auto;
+    min-height: 108mm;
+    background: var(--panel);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 16pt;
+  }
+  /* object-fit: cover IS the centre crop the design calls for, and it renders
+     the same in print as on screen — so no server-side derivative is stored. */
+  .hero img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center;
+  }
+  .hero::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      to bottom,
+      rgba(20,16,12,.34) 0%,
+      rgba(20,16,12,.06) 38%,
+      rgba(20,16,12,.72) 100%
+    );
+  }
+  .hero > * { position: relative; z-index: 1; }
+  .hero .eyebrow { color: rgba(255,255,255,.86); }
+  /* The cover headline is the one piece of type set at full display size. */
+  .hero h1 { color: #fff; font-size: var(--fs-cover); line-height: .98; }
+  .hero .subtitle {
+    font-family: var(--font-display);
+    font-style: italic;
+    font-size: var(--fs-cover-sub);
+    color: rgba(255,255,255,.9);
+    margin-top: 6pt;
+  }
+  .no-image { background: var(--cream); }
+  .no-image::after { background: none; }
+  .no-image .eyebrow { color: var(--gold); }
+  .no-image h1 { color: var(--ink); }
+  .no-image .subtitle { color: var(--ink-soft); }
+
+  /* ---- Fact strips and cells ---- */
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+    border: 1px solid var(--hairline);
+    margin-top: 12pt;
+  }
+  .facts > div {
+    padding: 8pt 10pt;
+    border-right: 1px solid var(--hairline);
+  }
+  .facts > div:last-child { border-right: 0; }
+  /* The transport page reuses .spec as a plain 2-up grid with no fill. */
+  .spec.plain { border: 0; gap: 8pt; }
+  .spec.plain > div { background: transparent; border: 1px solid var(--hairline); }
+  .cell-label {
+    font-size: var(--fs-label);
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin-bottom: 3pt;
+  }
+  .cell-value { font-size: var(--fs-value); font-weight: 600; color: var(--ink); }
+
+  /* Background and border sit on each CELL, not on the container: with five
+     facts in a three-column grid the container would otherwise draw a sixth,
+     empty, bordered box that reads as a missing value. */
+  /* Borders belong to the CELLS, not the container: with five facts in a
+     three-column grid a container border would draw a sixth, empty, bordered box
+     that reads as a missing value. A short last row now simply ends. */
+  .glance {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    border-top: 1px solid var(--hairline);
+    border-left: 1px solid var(--hairline);
+  }
+  .glance > div {
+    padding: 11pt 12pt;
+    background: var(--cream);
+    border-right: 1px solid var(--hairline);
+    border-bottom: 1px solid var(--hairline);
+  }
+  .glance .cell-value {
+    font-family: var(--font-display);
+    font-size: var(--fs-stat);
+    font-weight: 600;
+    font-variant-numeric: oldstyle-nums;
+  }
+
+  /* ---- Dark panel and ticked lists ---- */
+  .panel {
+    background: var(--panel);
+    color: var(--panel-ink);
+    padding: 14pt 16pt;
+  }
+  .panel .cell-label, .panel .eyebrow { color: var(--gold-soft); }
+  .ticks { list-style: none; margin: 0; padding: 0; }
+  .ticks li { padding: 2.5pt 0 2.5pt 15pt; position: relative; font-size: var(--fs-tick); }
+  .ticks li::before {
+    content: "\2713";
+    position: absolute;
+    left: 0;
+    color: var(--gold);
+  }
+  .panel .ticks li::before { color: var(--gold-soft); }
+  /* An exclusions list marked with ticks reads as an inclusions list at a
+     glance, which is the one misreading this section cannot afford. */
+  .crosses li::before { content: "–"; color: var(--ink-soft); }
+  .two-col { column-count: 2; column-gap: 22pt; }
+
+  /* ---- Notices ---- */
+  .notice {
+    background: var(--cream);
+    border-left: 3px solid var(--gold);
+    padding: 10pt 12pt;
+    margin: 12pt 0;
+    font-size: var(--fs-note);
+  }
+  .notice .cell-label { margin-bottom: 5pt; }
+
+  /* ---- Option page ---- */
+  .option-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14pt; }
+  .option-head h1 { line-height: 1.0; }
+  .chip {
+    display: inline-block;
+    background: var(--panel);
+    color: var(--panel-ink);
+    font-size: var(--fs-chip);
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    padding: 5pt 10pt;
+    white-space: nowrap;
+  }
+  .chip-soft { background: var(--gold); color: #fff; letter-spacing: .12em; padding: 3pt 7pt; }
+  .option-hero {
+    margin-top: 12pt;
+    height: 62mm;
+    background: var(--cream);
+    overflow: hidden;
+  }
+  .option-hero img { width: 100%; height: 100%; object-fit: cover; object-position: center; }
+  .gallery { display: grid; gap: 6pt; margin-top: 6pt; }
+  .gallery div { height: 22mm; background: var(--cream); overflow: hidden; }
+  .gallery img { width: 100%; height: 100%; object-fit: cover; object-position: center; }
+
+  /* ---- Day by day (Stage 4.1) ----
+     A rail of days rather than a table: a programme is read down the page one
+     day at a time, and a six-column grid makes the eye scan across it. The
+     date column is fixed so the days line up whatever the month. */
+  .days { margin-top: 16pt; border-top: 1px solid var(--hairline); }
+  .day {
+    display: grid;
+    grid-template-columns: 30mm 1fr;
+    gap: 12pt;
+    padding: 9pt 0;
+    border-bottom: 1px solid var(--hairline);
+    page-break-inside: avoid;
+  }
+  .day-when { border-right: 1px solid var(--hairline); padding-right: 10pt; }
+  .day-what .property { font-weight: 600; }
+  .day-events { margin: 4pt 0 0; padding-left: 12pt; }
+  .day-events li { margin-top: 2pt; font-size: var(--fs-note); }
+  .day-board { color: var(--ink-soft); font-size: var(--fs-note); margin-top: 3pt; }
+
+  .option-body { display: grid; grid-template-columns: 1.12fr .88fr; gap: 14pt; margin-top: 14pt; }
+  .spec {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    border-top: 1px solid var(--hairline);
+    border-left: 1px solid var(--hairline);
+  }
+  .spec > div {
+    padding: 9pt 11pt;
+    background: var(--cream);
+    border-right: 1px solid var(--hairline);
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .price {
+    background: var(--panel);
+    color: var(--panel-ink);
+    padding: 14pt 16pt;
+  }
+  .price .amount {
+    font-family: var(--font-display);
+    font-size: var(--fs-price);
+    line-height: 1.1;
+    color: #fff;
+    font-variant-numeric: oldstyle-nums;
+  }
+  .price .amount-sub { font-size: var(--fs-price-sum); color: var(--gold-soft); margin-top: 2pt; }
+  .price hr { border: 0; height: 1px; background: rgba(255,255,255,.22); margin: 11pt 0; }
+  .included { border: 1px solid var(--hairline); padding: 11pt 13pt; margin-top: 8pt; }
+
+  /* ---- Comparison table ---- */
+  table { width: 100%; border-collapse: collapse; font-size: var(--fs-table); }
+  thead th {
+    background: var(--panel);
+    color: var(--panel-ink);
+    text-align: left;
+    font-weight: 600;
+    font-size: var(--fs-label);
+    letter-spacing: .15em;
+    text-transform: uppercase;
+    padding: 9pt 8pt;
+  }
+  thead th.num { text-align: right; }
+  tbody td { padding: 9pt 8pt; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+  tbody td.num { text-align: right; font-weight: 600; color: var(--ink); white-space: nowrap; }
+  tbody tr.recommended { background: var(--cream-tint); }
+  tbody td.property { font-weight: 600; color: var(--ink); }
+
+  /* ---- Experience page ---- */
+  .mosaic { display: grid; grid-template-columns: 1.25fr 1fr; gap: 7pt; margin: 12pt 0; }
+  .mosaic .tall { height: 74mm; background: var(--cream); overflow: hidden; }
+  .mosaic .stack { display: grid; grid-template-rows: 1fr 1fr; gap: 7pt; }
+  .mosaic .stack div { background: var(--cream); overflow: hidden; }
+  .mosaic img { width: 100%; height: 100%; object-fit: cover; object-position: center; }
+
+  /* ---- Contact block ---- */
+  .contact { display: grid; grid-template-columns: 1.1fr .9fr; gap: 12pt; margin-top: 14pt; }
+  .contact .panel .field { margin-bottom: 9pt; }
+  .disclaimer { font-size: var(--fs-fine); color: var(--gold); margin-top: 8pt; }
+  .tagline {
+    font-family: var(--font-display);
+    font-style: italic;
+    font-size: var(--fs-stat);
+    color: var(--ink);
+    /* 1.7 is body leading and far too loose for three lines of display italic;
+       it also cost the closing page its footer, which then took a sheet of its
+       own. Display type wants tighter leading as it grows. */
+    line-height: 1.26;
+    margin-top: 7pt;
+  }
+
+  .page-foot {
+    margin-top: auto;
+    padding-top: 12pt;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: var(--fs-label);
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--gold);
+  }
+  .spacer { flex: 1 1 auto; }
+</style>
+</head>
+<body>
+
+{# ============================ 1. Cover ============================ #}
+<section class="page">
+  <div class="masthead">
+    <div class="wordmark">{{ view.config.company_name }}</div>
+    <div class="eyebrow" style="margin:0">{{ view.config.proposal_kind }}</div>
+  </div>
+
+  <div class="hero{% if not view.cover %} no-image{% endif %}">
+    {% if view.cover %}<img src="{{ view.cover.url }}" alt="{{ view.cover.alt }}">{% endif %}
+    <div class="eyebrow">{{ view.destination_label }}</div>
+    <div>
+      <h1>{{ view.title }}</h1>
+      <div class="subtitle">{{ view.subtitle }}</div>
+    </div>
+  </div>
+
+  <div class="facts">
+    {% for fact in view.cover_facts %}
+    <div>
+      <div class="cell-label">{{ fact.label }}</div>
+      <div class="cell-value">{{ fact.value }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="page-foot">
+    <span>{{ view.config.company_name }}</span>
+    <span>{{ view.quote_number }}</span>
+    <span>{{ view.config.contact_email }} &nbsp; {{ view.config.contact_phone }}</span>
+  </div>
+</section>
+
+{# ============================ 2. Welcome ============================ #}
+<section class="page">
+  <div class="eyebrow">{{ view.config.welcome_eyebrow }}</div>
+  <h1>{{ view.intro_heading }}</h1>
+  <div style="margin-top:14pt">
+    {% for para in view.intro_paragraphs %}<p class="lede">{{ para }}</p>{% endfor %}
+  </div>
+
+  <hr class="rule">
+  <div class="eyebrow">At a glance</div>
+  <div class="glance">
+    {% for fact in view.glance %}
+    <div>
+      <div class="cell-label">{{ fact.label }}</div>
+      <div class="cell-value">{{ fact.value }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  {% if view.config.why_us_points %}
+  <div class="panel" style="margin-top:16pt">
+    <div class="eyebrow">{{ view.config.why_us_heading }}</div>
+    <ul class="ticks two-col">
+      {% for point in view.config.why_us_points %}<li>{{ point }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  <div class="spacer"></div>
+  <div class="page-foot"><span>{{ view.quote_number }}</span><span>{{ view.config.vat_note }}</span></div>
+</section>
+
+{# ======================= 3. Transport (only if the quote has legs) ======= #}
+{% if view.transport %}
+<section class="page">
+  <div class="eyebrow">Logistics</div>
+  <h1>Seamless Group Transport</h1>
+  <p class="lede" style="margin-top:12pt">{{ view.transport.summary }}</p>
+
+  {% if view.transport.hero %}
+  <div class="option-hero" style="height:44mm">
+    <img src="{{ view.transport.hero.url }}" alt="{{ view.transport.hero.alt }}">
+  </div>
+  {% endif %}
+
+  <div class="eyebrow" style="margin-top:14pt">{{ view.transport.route_label }}</div>
+  <div class="spec plain">
+    {% for leg in view.transport.legs %}
+    <div>
+      <div class="cell-label">{{ leg.route }}</div>
+      <div class="cell-value" style="font-family:var(--font-display);font-weight:400;font-size:var(--fs-leg)">{{ leg.note }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12pt;margin-top:12pt">
+    <div class="panel">
+      <div class="cell-label">{% if view.transport.add_on %}Optional upgrades{% else %}Complete round-trip group transfers{% endif %}</div>
+      <div style="font-family:var(--font-display);font-size:var(--fs-stat);color:#fff">{{ view.transport.add_on or "Included in packages" }}</div>
+    </div>
+    <div style="border:1px solid var(--hairline);padding:14pt 16pt">
+      <div class="cell-label">Group capacity</div>
+      <div style="font-family:var(--font-display);font-size:var(--fs-pax);color:var(--ink);font-variant-numeric:oldstyle-nums">{{ view.transport.capacity }}</div>
+    </div>
+  </div>
+
+  {% if view.transport.named %}
+  {# Named and never priced: Heissal holds no ticketing licence, so the fare is
+     the client's to book (§3.10). Leaving the flight off the page entirely is
+     how a client turns up without a ticket. #}
+  <div class="notice">
+    <div class="cell-label">Flights are not included</div>
+    {{ view.transport.named | join("; ") }} &mdash; to be booked directly by you.
+    Airport transfers on arrival and departure are arranged as above.
+  </div>
+  {% endif %}
+
+  <p style="margin-top:14pt">Final transport scheduling will be coordinated around the
+  confirmed itinerary and accommodation selection.</p>
+  <div class="spacer"></div>
+  <div class="page-foot"><span>{{ view.quote_number }}</span><span>{{ view.config.vat_note }}</span></div>
+</section>
+{% endif %}
+
+{# ======================= 4. Options index ======================= #}
+{% if view.options %}
+<section class="page">
+  <div class="eyebrow">Accommodation</div>
+  <h1>Choose Your Experience</h1>
+  <p class="lede" style="margin-top:12pt">We have curated a selection of accommodation
+  options to suit different preferences, from flexible value accommodation to
+  full-board convenience and premium resort experiences.</p>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10pt;margin-top:14pt">
+    {% for option in view.options %}
+    <div style="border:1px solid var(--hairline);padding:12pt 13pt;min-height:26mm">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8pt">
+        <div class="serif-note" style="font-style:normal">{{ option.number }}</div>
+        {% if option.is_recommended %}<span class="chip">Recommended</span>{% endif %}
+      </div>
+      <h3 style="margin-top:6pt">{{ option.name }}</h3>
+      <div style="font-size:var(--fs-desc);color:var(--ink-soft);margin-top:4pt">{{ option.tagline }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <p class="serif-note center" style="margin-top:18pt">{{ view.config.vat_note }}.</p>
+  <div class="spacer"></div>
+  <div class="page-foot"><span>{{ view.quote_number }}</span><span>{{ view.options | length }} options</span></div>
+</section>
+{% endif %}
+
+{# ================== 5..n. One page per option ================== #}
+{% for option in view.options %}
+<section class="page">
+  <div class="option-head">
+    <div>
+      <div class="eyebrow">Option {{ option.number }}</div>
+      <h1 style="font-size:var(--fs-property)">{{ option.name }}</h1>
+      <div class="eyebrow" style="margin-top:6pt;color:var(--ink-soft)">{{ option.tagline }}</div>
+    </div>
+    {% if option.is_recommended %}<span class="chip">&#9733; Recommended</span>{% endif %}
+  </div>
+
+  {# A package page gives 24mm of its photograph back to the itinerary table:
+     the legs have to fit on the same page as the price they belong to, and a
+     table continued overleaf is a table nobody reads. #}
+  <div class="option-hero"{% if option.itinerary | length > 1 %} style="height:38mm"{% endif %}>
+    {% if option.hero %}<img src="{{ option.hero.url }}" alt="{{ option.hero.alt }}">{% endif %}
+  </div>
+  {# A package's page spends its space on the itinerary instead: the legs are
+     what the client cannot get anywhere else on the document, and four
+     thumbnails plus a six-row table does not fit A4. #}
+  {% if option.gallery and option.itinerary | length <= 1 %}
+  <div class="gallery" style="grid-template-columns:repeat({{ option.gallery | length }},1fr)">
+    {% for image in option.gallery %}<div><img src="{{ image.url }}" alt="{{ image.alt }}"></div>{% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="option-body">
+    <div>
+      <div class="spec">
+        {% for fact in option.facts %}
+        <div>
+          <div class="cell-label">{{ fact.label }}</div>
+          <div class="cell-value">{{ fact.value }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% if option.comparability_note %}
+      <div class="notice">{{ option.comparability_note }}</div>
+      {% endif %}
+      {% if option.blurb %}<p style="margin-top:12pt">{{ option.blurb }}</p>{% endif %}
+    </div>
+
+    <div>
+      <div class="price">
+        {% if option.per_person %}
+        <div class="cell-label">Client package rate</div>
+        <div class="amount">{{ option.per_person }}</div>
+        <div class="amount-sub">per person</div>
+        <hr>
+        {% endif %}
+        <div class="cell-label">Total group price</div>
+        <div class="amount">{{ option.group_total }}</div>
+      </div>
+      {% if option.cohorts %}
+      {# A mixed group has no single per-person figure — residents and
+         non-residents are charged different rates in different currencies
+         (§3.8) — so without these rows such a client sees a group total and
+         nothing else. Stacked rather than tabulated: this column is .88fr of
+         the page, and two money columns would leave the label three
+         characters wide. #}
+      <div class="included" style="margin-top:8pt">
+        <div class="cell-label">Per traveller</div>
+        {% for cohort in option.cohorts %}
+        <div style="margin-top:7pt">
+          <div class="cell-label" style="color:var(--ink-soft)">{{ cohort.label }}{% if cohort.headcount %} &middot; {{ cohort.headcount }}{% endif %}</div>
+          <div class="cell-value">{{ cohort.per_person }}</div>
+          <div class="cell-label">{{ cohort.total }} in total</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      <div class="included">
+        <div class="cell-label">Included</div>
+        <ul class="ticks">
+          {% for item in option.included %}<li>{{ item }}</li>{% endfor %}
+        </ul>
+      </div>
+      <p class="serif-note" style="margin-top:7pt">{{ view.config.vat_note }}.</p>
+    </div>
+  </div>
+
+  {% if option.itinerary | length > 1 %}
+  {# Full width, below the two columns: a package's facts panel describes its
+     first leg only, so the legs are what actually answer "what am I buying"
+     (§3.9), and six columns do not fit a half-width panel. Printed only past
+     one leg — for a single hotel the panel above has already said it. #}
+  <div class="eyebrow" style="margin-top:14pt">The itinerary</div>
+  <table style="margin-top:8pt">
+    <thead>
+      <tr>
+        <th>Leg</th>
+        <th>Where</th>
+        <th>Property</th>
+        <th>Nights</th>
+        <th>Room</th>
+        <th>Board</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for leg in option.itinerary %}
+      <tr>
+        <td>{{ leg.step }}</td>
+        <td>{{ leg.destination }}</td>
+        <td class="property">{{ leg.property_name }}</td>
+        <td>{{ leg.nights }}</td>
+        <td>{{ leg.room }}</td>
+        <td>{{ leg.board }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  <div class="spacer"></div>
+  <div class="page-foot"><span>{{ view.quote_number }}</span><span>Option {{ option.number }}</span></div>
+</section>
+{% endfor %}
+
+{# ================== Day by day (Stage 4.1) ================== #}
+{% if view.programme %}
+{# One page for the recommended option, not one per option: five options is
+   five near-identical pages of the same journey. Printed only where the trip
+   has a shape to describe — see ``_programme`` for the rule. #}
+<section class="page">
+  <div class="eyebrow">Day by day</div>
+  <h1>Your Itinerary</h1>
+  <p class="serif-note" style="margin-top:6pt">
+    As quoted for {{ view.programme_option }}.
+  </p>
+
+  <div class="days">
+    {% for day in view.programme %}
+    <div class="day">
+      <div class="day-when">
+        <div class="cell-label">{{ day.label }}</div>
+        <div class="cell-value">{{ day.on }}</div>
+      </div>
+      <div class="day-what">
+        <div class="property">
+          {%- if day.move %}{{ day.move }}
+          {%- else %}{{ day.place }}{% if day.property_name and day.property_name != day.place %} &middot; {{ day.property_name }}{% endif %}
+          {%- endif %}
+        </div>
+        {% if day.move %}<div class="day-board">{{ day.place }}</div>{% endif %}
+        {% if day.events %}
+        <ul class="day-events">
+          {% for event in day.events %}<li>{{ event }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {% if day.board %}<div class="day-board">{{ day.board }}</div>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="spacer"></div>
+  <div class="page-foot"><span>{{ view.quote_number }}</span><span>Day by day</span></div>
+</section>
+{% endif %}
+
+{# ================== Comparison + considered-and-declined ================== #}
+{% if view.comparison %}
+<section class="page">
+  <div class="eyebrow">Comparison</div>
+  <h1>At a Glance — Package Options</h1>
+
+  <table style="margin-top:14pt">
+    <thead>
+      <tr>
+        <th>Property</th>
+        <th>Rooming</th>
+        <th>Meal plan</th>
+        <th>Transport</th>
+        <th class="num">Rate / person</th>
+        <th class="num">Total group</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in view.comparison %}
+      <tr{% if row.is_recommended %} class="recommended"{% endif %}>
+        <td class="property">
+          {% if row.is_recommended %}<span class="chip chip-soft" style="display:block;width:max-content;margin-bottom:4pt">Recommended</span>{% endif %}{{ row.name }}
+          {# The route, not another column: it is what tells two packages apart
+             when they share their first property (§3.9). #}
+          {% if row.route and row.route != row.name %}<div class="cell-label" style="margin-top:3pt">{{ row.route }}</div>{% endif %}
+        </td>
+        <td>{{ row.rooming }}</td>
+        <td>{{ row.meal_plan }}</td>
+        <td>{{ row.transport }}</td>
+        <td class="num">{{ row.per_person or "—" }}</td>
+        <td class="num">{{ row.group_total }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <p style="margin-top:12pt;font-weight:600;color:var(--ink)">{{ view.config.vat_note }}.</p>
+
+  {% if view.exclusions %}
+  {# A priced proposal that does not say what it excludes is the commonest
+     cause of a dispute at invoice time: one total reads as covering everything
+     a holiday needs (§3.12). Beside the table on purpose — this is the page a
+     client reads before they choose. #}
+  <hr class="rule">
+  <div class="eyebrow">{{ view.config.exclusions_heading }}</div>
+  <ul class="ticks two-col crosses" style="margin-top:8pt">
+    {% for item in view.exclusions %}<li>{{ item }}</li>{% endfor %}
+  </ul>
+  <p class="serif-note" style="margin-top:6pt">{{ view.config.exclusions_note }}</p>
+  {% endif %}
+
+  <div class="notice">
+    <div class="cell-label">{{ view.config.availability_notice_heading }}</div>
+    {{ view.config.availability_notice }}
+  </div>
+
+  {% if view.rejected %}
+  <hr class="rule">
+  <div class="eyebrow">Additional options considered</div>
+  {% for candidate in view.rejected %}
+  <h3 style="margin-top:10pt">{{ candidate.name }}</h3>
+  <p style="margin-top:5pt">{{ candidate.reason }}</p>
+  {% endfor %}
+  {% endif %}
+  <div class="spacer"></div>
+  <div class="page-foot"><span>{{ view.quote_number }}</span><span>Comparison</span></div>
+</section>
+{% endif %}
+
+{# ============ Signature experiences (only those flagged for a page) ======= #}
+{% for experience in view.experiences %}
+<section class="page">
+  <div class="eyebrow">{% if experience.is_optional %}Optional signature experience{% else %}Signature experience{% endif %}</div>
+  <h1>{{ experience.name }}</h1>
+  {% if experience.description %}<p class="lede" style="margin-top:12pt">{{ experience.description }}</p>{% endif %}
+
+  {% if experience.images %}
+  <div class="mosaic">
+    <div class="tall"><img src="{{ experience.images[0].url }}" alt="{{ experience.images[0].alt }}"></div>
+    <div class="stack">
+      {% for image in experience.images[1:3] %}<div><img src="{{ image.url }}" alt="{{ image.alt }}"></div>{% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <div style="display:grid;grid-template-columns:1.15fr .85fr;gap:14pt;margin-top:12pt">
+    <div>
+      {% if experience.includes %}
+      <div class="eyebrow">The experience includes</div>
+      <ul class="ticks two-col">
+        {% for item in experience.includes %}<li>{{ item }}</li>{% endfor %}
+      </ul>
+      {% endif %}
+      {% if experience.tiers %}
+      <div class="eyebrow" style="margin-top:14pt">Options</div>
+      <table>
+        <tbody>
+          {% for tier in experience.tiers %}
+          <tr><td>{{ tier.label }}</td><td class="num">{{ tier.value }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+    <div>
+      {% if experience.per_person %}
+      <div class="price">
+        <div class="cell-label">Per person</div>
+        <div class="amount">{{ experience.per_person }}</div>
+      </div>
+      {% endif %}
+      {% if experience.is_optional %}
+      <div class="included">
+        <div class="cell-label">Optional add-on</div>
+        <p style="margin:6pt 0 0">This experience is not included in any of the
+        accommodation package prices and is quoted separately.</p>
+      </div>
+      {% endif %}
+      <p class="serif-note" style="margin-top:7pt">{{ view.config.vat_note }}.</p>
+    </div>
+  </div>
+  <div class="spacer"></div>
+  <div class="page-foot"><span>{{ view.quote_number }}</span><span>Optional experience</span></div>
+</section>
+{% endfor %}
+
+{# ============================ Next steps ============================ #}
+<section class="page">
+  <div class="eyebrow">Next steps</div>
+  <h1>{{ view.config.next_steps_heading }}</h1>
+  <p class="lede" style="margin-top:12pt">{{ view.config.next_steps_body }}</p>
+
+  {% if view.config.coordination_points %}
+  <div class="eyebrow" style="margin-top:6pt">{{ view.config.coordination_heading }}</div>
+  <ul class="ticks two-col">
+    {% for point in view.config.coordination_points %}<li>{{ point }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  <div class="notice">
+    <div class="cell-label">{{ view.config.availability_notice_heading }}</div>
+    {{ view.config.availability_notice }}
+  </div>
+
+  <div class="contact">
+    <div class="panel">
+      <div style="font-family:var(--font-display);font-size:var(--fs-card);color:#fff;margin-bottom:10pt">{{ view.config.company_name }}</div>
+      <div class="field">
+        <div class="cell-label">Email</div>
+        <div>{{ view.config.contact_email }}</div>
+      </div>
+      <div class="field">
+        <div class="cell-label">Call / WhatsApp</div>
+        <div>{{ view.config.contact_phone }}</div>
+      </div>
+      <div class="field">
+        <div class="cell-label">Social media</div>
+        <div>{{ view.config.social_line }}</div>
+      </div>
+    </div>
+    <div style="border:1px solid var(--hairline);padding:14pt 16pt">
+      <div class="cell-label">This proposal</div>
+      <div style="font-family:var(--font-display);font-size:var(--fs-card);color:var(--ink);font-variant-numeric:oldstyle-nums">{{ view.quote_number }}</div>
+      <hr class="rule" style="margin:11pt 0">
+      <div class="cell-label">Issued</div>
+      <div style="margin-bottom:8pt">{{ view.issued_on.strftime('%d %B %Y') }}</div>
+      {% if view.valid_until %}
+      <div class="cell-label">Valid until</div>
+      <div>{{ view.valid_until.strftime('%d %B %Y') }}</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="disclaimer">{{ view.config.closing_disclaimer }}</div>
+
+  {% if view.config.tagline_lines %}
+  <div class="tagline center">
+    {% for line in view.config.tagline_lines %}{{ line }}<br>{% endfor %}
+  </div>
+  {% endif %}
+  <div class="spacer"></div>
+  <div class="page-foot">
+    <span>{{ view.config.company_name }}</span>
+    <span>{{ view.config.contact_email }}</span>
+  </div>
+</section>
+
+</body>
+</html>

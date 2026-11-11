@@ -1,0 +1,560 @@
+"""Demo / test catalogue data (Stage 3.1).
+
+Why this exists
+---------------
+Tests were building an entire scenario per test through the HTTP API — roughly a
+dozen round trips each, which against a hosted database costs ~100 seconds per
+test. Seeding one realistic dataset once and asserting against it makes the suite
+both faster and better: the fixture covers cases nobody would hand-build every
+time (an STO rate beside a discounted rack rate, a property with no full-board
+rate, a 4-guest villa, resident *and* non-resident pricing, activity price
+tiers, rail fares and per-vehicle transfer prices).
+
+**The property names here are invented.** They are shaped like the real reference
+quotation but the rates are synthetic, so this data can never be mistaken for a
+supplier's actual pricing. Real rates arrive through the Stage 3.2 ingestion
+pipeline — extracted from hotel documents and confirmed by a person — never from
+a seed script.
+
+Idempotent: re-running matches on slug / natural key and skips what exists, so it
+is safe to call before every test session.
+
+Run it directly with::
+
+    python -m app.db.seed_demo --yes
+
+It prints the target database first and refuses without ``--yes``, because
+loading invented hotel rates into the live catalogue is exactly the accident that
+would put a fabricated price in front of a client.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+import uuid
+from datetime import date
+from decimal import Decimal
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.db.session import AsyncSessionLocal
+from app.modules.accommodations.models import (
+    Accommodation,
+    AccommodationRate,
+    AccommodationSupplement,
+    MealPlan,
+    RoomType,
+)
+from app.modules.activities.models import Activity, ActivityPriceTier, ActivityRate
+from app.modules.destinations.models import Destination
+from app.modules.park_fees.models import ParkFee
+from app.modules.residence.models import ResidenceCategory
+from app.modules.transport.models import DestinationTransportMode, TransferRate
+from app.modules.vehicles.models import FuelPrice, Vehicle
+
+# A wide standard season. It opens at the start of 2026 (so every hard-coded
+# 2026 test date resolves) and runs years into the future, which is not
+# cosmetic: several suites build travel dates as ``date.today() + N`` to keep a
+# trip in the future, and a standard rate that ended 2026-12-31 meant those
+# dates walked off the end of the rate data as the wall clock advanced — a stay
+# priced in early 2027 then had no rate and its quote could not be issued.
+# Extending the close date decouples the seeded data from wall-clock time
+# without touching any test's dates or the 2026 festive window below (which
+# still wins inside its own narrower range via the per-night "latest
+# effective_from" tiebreak).
+SEASON_FROM = date(2026, 1, 1)
+SEASON_TO = date(2035, 12, 31)
+# A festive window laid over the wide season, the shape every real sheet uses:
+# a narrower period with its own rate, its own minimum stay, and a supplement
+# narrower still. It overlaps SEASON_FROM..SEASON_TO deliberately — that overlap
+# is what the per-night "latest effective_from wins" tiebreak is for.
+FESTIVE_FROM = date(2026, 12, 20)
+FESTIVE_TO = date(2027, 1, 2)
+FESTIVE_MIN_NIGHTS = 4
+# Narrower again than the festive season that contains it (§3.5a).
+SUPPLEMENT_FROM = date(2026, 12, 24)
+SUPPLEMENT_TO = date(2026, 12, 25)
+
+DEMO_MARKER = "demo-sample"
+
+
+def _slug(name: str) -> str:
+    return name.lower().replace(" ", "-").replace("&", "and").replace("--", "-")
+
+
+async def _get_or_create(
+    db: AsyncSession, model: Any, where: Any, **defaults: Any
+) -> Any:
+    """Fetch a row by a natural key, creating it from ``defaults`` if absent."""
+    existing = (await db.execute(select(model).where(where))).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    row = model(**defaults)
+    db.add(row)
+    await db.flush()
+    return row
+
+
+async def seed_demo(db: AsyncSession) -> dict[str, Any]:
+    """Load the demo catalogue and return the ids tests need."""
+    residence = {
+        r.key: r for r in (await db.execute(select(ResidenceCategory))).scalars().all()
+    }
+    meal_plans = {m.code: m for m in (await db.execute(select(MealPlan))).scalars().all()}
+    if not residence or not meal_plans:
+        raise RuntimeError("Run `python -m app.db.seed` first — base reference data missing.")
+
+    citizen = residence["citizen"]
+    non_resident = residence["non_resident"]
+    bb, hb, fb = meal_plans["BB"], meal_plans["HB"], meal_plans["FB"]
+
+    # --- Destinations: a coastal area and a park, the two shapes in use ------ #
+    diani = await _get_or_create(
+        db,
+        Destination,
+        Destination.slug == "demo-diani",
+        name="Diani (demo)",
+        slug="demo-diani",
+        type="beach",
+        country="Kenya",
+        region="Coast",
+    )
+    mara = await _get_or_create(
+        db,
+        Destination,
+        Destination.slug == "demo-mara-reserve",
+        name="Mara Reserve (demo)",
+        slug="demo-mara-reserve",
+        type="reserve",
+        country="Kenya",
+        region="Rift Valley",
+    )
+
+    # --- Properties, each chosen to exercise one rule ------------------------ #
+    # 1. Full board on an STO rate — the preferred rate kind, no discount maths.
+    # 2. Rack rate carrying a stated 15% discount — half of it reaches the client.
+    # 3. Bed & breakfast only — forces the FB -> HB -> BB fallback chain.
+    # 4. A 4-guest villa — rooming by capacity rather than twin-sharing.
+    # 5. A festive-only minimum stay — the property that must be refused and
+    #    still shown as a missed-out option (§3.3a).
+    properties: dict[str, Accommodation] = {}
+    for name, category in (
+        ("Coral Sands Resort", "resort"),
+        ("Baobab Beach Lodge", "lodge"),
+        ("Kaskazi Guest House", "guesthouse"),
+        ("Pendo Demo Villas", "villa"),
+        ("Chui Festive Camp", "camp"),
+    ):
+        properties[name] = await _get_or_create(
+            db,
+            Accommodation,
+            Accommodation.slug == _slug(f"demo {name}"),
+            name=f"{name} (demo)",
+            slug=_slug(f"demo {name}"),
+            destination_id=diani.id,
+            category=category,
+            blurb=f"{name} is invented demo data used by the test suite.",
+        )
+
+    def _room(prop: Accommodation, label: str, occupancy: int) -> dict[str, Any]:
+        return {
+            "accommodation_id": prop.id,
+            "name": label,
+            "code": label[:3].upper(),
+            "max_occupancy": occupancy,
+        }
+
+    rooms: dict[str, RoomType] = {}
+    for key, prop, label, occupancy in (
+        ("coral_twin", properties["Coral Sands Resort"], "Twin", 2),
+        ("coral_superior", properties["Coral Sands Resort"], "Superior Twin", 2),
+        ("baobab_twin", properties["Baobab Beach Lodge"], "Twin", 2),
+        ("kaskazi_twin", properties["Kaskazi Guest House"], "Twin", 2),
+        ("villa_two_bed", properties["Pendo Demo Villas"], "Two Bedroom", 4),
+        ("chui_twin", properties["Chui Festive Camp"], "Twin", 2),
+    ):
+        rooms[key] = await _get_or_create(
+            db,
+            RoomType,
+            (RoomType.accommodation_id == prop.id) & (RoomType.name == label),
+            **_room(prop, label, occupancy),
+        )
+
+    async def _rate(
+        room: RoomType,
+        plan: MealPlan,
+        rc: ResidenceCategory,
+        amount: str,
+        *,
+        kind: str = "rack",
+        discount: str | None = None,
+        currency: str = "KES",
+        child: str | None = None,
+        child_bounds: tuple[int, int] | None = None,
+        occupancy: int = 2,
+        single_supplement: str | None = None,
+        min_nights: int | None = None,
+        season: tuple[str, date, date] = ("standard", SEASON_FROM, SEASON_TO),
+    ) -> AccommodationRate:
+        label, starts, ends = season
+        # Occupancy is part of the natural key because it is part of rate
+        # identity (§3.3): without it the Single and Double rows of one sheet
+        # collide and only one of them can be stored.
+        return await _get_or_create(
+            db,
+            AccommodationRate,
+            (AccommodationRate.room_type_id == room.id)
+            & (AccommodationRate.meal_plan_id == plan.id)
+            & (AccommodationRate.residence_category_id == rc.id)
+            & (AccommodationRate.occupancy == occupancy)
+            & (AccommodationRate.effective_from == starts),
+            accommodation_id=room.accommodation_id,
+            room_type_id=room.id,
+            meal_plan_id=plan.id,
+            residence_category_id=rc.id,
+            season_name=f"{DEMO_MARKER} {label}",
+            effective_from=starts,
+            effective_to=ends,
+            currency=currency,
+            occupancy=occupancy,
+            rate_per_night=Decimal(amount),
+            child_rate=Decimal(child) if child else None,
+            single_supplement=(
+                Decimal(single_supplement) if single_supplement else None
+            ),
+            min_nights=min_nights,
+            # Stage 3 provenance: VAT-inclusive by default, rate kind, and the
+            # supplier discount left un-applied so pricing halves it later.
+            vat_inclusive=True,
+            vat_pct=Decimal("16"),
+            rate_kind=kind,
+            supplier_discount_pct=Decimal(discount) if discount else None,
+            child_min_age=child_bounds[0] if child_bounds else None,
+            child_max_age=child_bounds[1] if child_bounds else None,
+        )
+
+    # Coral Sands: STO full board (preferred), plus a cheaper twin so
+    # "cheapest within the hotel" has something to choose between.
+    await _rate(rooms["coral_twin"], fb, citizen, "9000", kind="sto")
+    await _rate(rooms["coral_superior"], fb, citizen, "12500", kind="sto")
+    # The same twin priced for one guest. A single is neither half a double nor
+    # equal to one — it is its own quoted figure, which is why occupancy is part
+    # of rate identity (§3.3). 25 guests in these twins is therefore
+    # 12 x 9,000 + 1 x 6,500, not 13 x 9,000 and not 12.5 x 9,000.
+    await _rate(rooms["coral_twin"], fb, citizen, "6500", kind="sto", occupancy=1)
+    # Non-resident pricing is materially higher — the gap tests §3.6a.
+    await _rate(rooms["coral_twin"], fb, non_resident, "180", kind="sto", currency="USD")
+
+    # Baobab: rack rate with a stated 15% discount, and a child policy where a
+    # child is 3–11 (over 11 pays adult). No single-occupancy row: the sheet
+    # states a single supplement instead, which is the §3.3 fallback.
+    await _rate(
+        rooms["baobab_twin"], fb, citizen, "24000",
+        kind="rack", discount="15", child="12000", child_bounds=(3, 11),
+        single_supplement="4000",
+    )
+
+    # Kaskazi: bed & breakfast ONLY — no FB or HB row exists, so a full-board
+    # request must fall through the chain and land on BB + chef cost.
+    await _rate(rooms["kaskazi_twin"], bb, citizen, "6000")
+
+    # Pendo villas: half board on a 4-guest unit, priced AT four guests. The
+    # occupancy has to match the unit or the villa cannot be priced at all: a
+    # rate quoted for two says nothing about what four people in it cost, and
+    # inventing the difference is exactly what §3.3 forbids.
+    await _rate(rooms["villa_two_bed"], hb, citizen, "16000", occupancy=4)
+
+    # Chui: bookable most of the year, but the festive window carries its own
+    # rate AND a four-night minimum. A three-night December request must be
+    # refused and still appear on the document as a missed-out option (§3.3a),
+    # while the same three nights in July price normally.
+    await _rate(rooms["chui_twin"], fb, citizen, "14000")
+    await _rate(
+        rooms["chui_twin"], fb, citizen, "22000",
+        min_nights=FESTIVE_MIN_NIGHTS,
+        season=("festive", FESTIVE_FROM, FESTIVE_TO),
+    )
+
+    # --- A compulsory festive supplement (§3.5a) ---------------------------- #
+    # Property-wide (no room type, plan or residence scope) and narrower than the
+    # season around it, so a stay has to be counted night by night against it.
+    await _get_or_create(
+        db,
+        AccommodationSupplement,
+        (AccommodationSupplement.accommodation_id
+         == properties["Coral Sands Resort"].id)
+        & (AccommodationSupplement.label == f"{DEMO_MARKER} Christmas dinner")
+        & (AccommodationSupplement.effective_from == SUPPLEMENT_FROM),
+        accommodation_id=properties["Coral Sands Resort"].id,
+        label=f"{DEMO_MARKER} Christmas dinner",
+        kind="gala",
+        basis="per_person_per_night",
+        amount=Decimal("2500"),
+        currency="KES",
+        effective_from=SUPPLEMENT_FROM,
+        effective_to=SUPPLEMENT_TO,
+        is_mandatory=True,
+    )
+
+    # --- Park fees: per day of stay, resident and non-resident -------------- #
+    for rc, amount, currency in ((citizen, "1200", "KES"), (non_resident, "70", "USD")):
+        await _get_or_create(
+            db,
+            ParkFee,
+            (ParkFee.destination_id == mara.id)
+            & (ParkFee.residence_category_id == rc.id)
+            & (ParkFee.effective_from == SEASON_FROM),
+            destination_id=mara.id,
+            fee_type="park_entry",
+            residence_category_id=rc.id,
+            currency=currency,
+            adult=Decimal(amount),
+            child=Decimal(amount) / 2,
+            infant=Decimal("0"),
+            child_min_age=3,
+            child_max_age=11,
+            effective_from=SEASON_FROM,
+            effective_to=SEASON_TO,
+        )
+
+    # --- Activities: one mandatory, one optional with a duration ladder ----- #
+    boat = await _get_or_create(
+        db,
+        Activity,
+        Activity.slug == "demo-dhow-cruise",
+        name="Dhow sunset cruise (demo)",
+        slug="demo-dhow-cruise",
+        destination_id=diani.id,
+        duration_minutes=120,
+        is_optional=False,
+        is_mandatory=True,
+    )
+    quad = await _get_or_create(
+        db,
+        Activity,
+        Activity.slug == "demo-quad-biking",
+        name="Quad biking (demo)",
+        slug="demo-quad-biking",
+        destination_id=diani.id,
+        is_optional=True,
+        has_own_section=True,
+    )
+    for activity, adult, child in ((boat, "3500", "1800"), (quad, "2500", "2500")):
+        await _get_or_create(
+            db,
+            ActivityRate,
+            (ActivityRate.activity_id == activity.id)
+            & (ActivityRate.residence_category_id == citizen.id)
+            & (ActivityRate.effective_from == SEASON_FROM),
+            activity_id=activity.id,
+            residence_category_id=citizen.id,
+            currency="KES",
+            adult_price=Decimal(adult),
+            child_price=Decimal(child),
+            effective_from=SEASON_FROM,
+            effective_to=SEASON_TO,
+        )
+    # The timed ladder the quotation renders as a small table.
+    for label, minutes, price, order in (
+        ("10 minutes", 10, "1500", 1),
+        ("15 minutes", 15, "2000", 2),
+        ("30 minutes", 30, "3500", 3),
+    ):
+        await _get_or_create(
+            db,
+            ActivityPriceTier,
+            (ActivityPriceTier.activity_id == quad.id)
+            & (ActivityPriceTier.residence_category_id == citizen.id)
+            & (ActivityPriceTier.label == label)
+            & (ActivityPriceTier.effective_from == SEASON_FROM),
+            activity_id=quad.id,
+            residence_category_id=citizen.id,
+            label=label,
+            duration_minutes=minutes,
+            price=Decimal(price),
+            currency="KES",
+            effective_from=SEASON_FROM,
+            effective_to=SEASON_TO,
+            sort_order=order,
+        )
+
+    # --- Fleet + fuel (Stage 2 costing, still used for game drives) --------- #
+    fuel_type = "demo-diesel"
+    coaster = await _get_or_create(
+        db,
+        Vehicle,
+        Vehicle.slug == "demo-coaster",
+        name="Coaster 25-seater (demo)",
+        slug="demo-coaster",
+        vehicle_type="minibus",
+        passenger_capacity=25,
+        fuel_type=fuel_type,
+        fuel_consumption_kmpl=Decimal("6"),
+        daily_operating_cost=Decimal("4000"),
+        driver_cost_per_day=Decimal("3000"),
+        currency="KES",
+    )
+    await _get_or_create(
+        db,
+        FuelPrice,
+        (FuelPrice.fuel_type == fuel_type) & (FuelPrice.effective_from == SEASON_FROM),
+        fuel_type=fuel_type,
+        price_per_litre=Decimal("185"),
+        currency="KES",
+        effective_from=SEASON_FROM,
+    )
+
+    # --- Rail fares and transfer prices (Stage 3.8) ------------------------- #
+    # Seeded at the stated current fares; rows, not constants, because fares move.
+    for travel_class, fare in (("economy", "1500"), ("business", "12000")):
+        await _get_or_create(
+            db,
+            DestinationTransportMode,
+            (DestinationTransportMode.destination_id == diani.id)
+            & (DestinationTransportMode.mode == "rail")
+            & (DestinationTransportMode.travel_class == travel_class)
+            & (DestinationTransportMode.effective_from == SEASON_FROM),
+            destination_id=diani.id,
+            mode="rail",
+            travel_class=travel_class,
+            label=f"SGR {travel_class} (demo)",
+            cost_basis="per_person",
+            price=Decimal(fare),
+            currency="KES",
+            effective_from=SEASON_FROM,
+        )
+    # Same leg, two vehicle types, two prices — the §3.8 rule in data form.
+    for vehicle_type, price in (("minibus", "12000"), ("saloon", "4500")):
+        await _get_or_create(
+            db,
+            TransferRate,
+            (TransferRate.destination_id == diani.id)
+            & (TransferRate.vehicle_type == vehicle_type)
+            & (TransferRate.route_label == "Terminus to hotel")
+            & (TransferRate.effective_from == SEASON_FROM),
+            destination_id=diani.id,
+            vehicle_type=vehicle_type,
+            route_label="Terminus to hotel",
+            price_per_leg=Decimal(price),
+            currency="KES",
+            effective_from=SEASON_FROM,
+        )
+
+    await db.commit()
+
+    return {
+        "destination_diani": str(diani.id),
+        "destination_mara": str(mara.id),
+        "residence_citizen": str(citizen.id),
+        "residence_non_resident": str(non_resident.id),
+        "meal_plan_bb": str(bb.id),
+        "meal_plan_hb": str(hb.id),
+        "meal_plan_fb": str(fb.id),
+        "acc_sto_full_board": str(properties["Coral Sands Resort"].id),
+        "acc_rack_discounted": str(properties["Baobab Beach Lodge"].id),
+        "acc_bb_only": str(properties["Kaskazi Guest House"].id),
+        "acc_villa": str(properties["Pendo Demo Villas"].id),
+        "acc_min_stay": str(properties["Chui Festive Camp"].id),
+        "room_coral_twin": str(rooms["coral_twin"].id),
+        "room_coral_superior": str(rooms["coral_superior"].id),
+        "room_baobab_twin": str(rooms["baobab_twin"].id),
+        "room_kaskazi_twin": str(rooms["kaskazi_twin"].id),
+        "room_villa": str(rooms["villa_two_bed"].id),
+        "room_chui_twin": str(rooms["chui_twin"].id),
+        "activity_mandatory": str(boat.id),
+        "activity_optional": str(quad.id),
+        "vehicle_coaster": str(coaster.id),
+        "fuel_type": fuel_type,
+        "season_from": SEASON_FROM.isoformat(),
+        "season_to": SEASON_TO.isoformat(),
+        "festive_from": FESTIVE_FROM.isoformat(),
+        "festive_to": FESTIVE_TO.isoformat(),
+        "festive_min_nights": FESTIVE_MIN_NIGHTS,
+        "supplement_from": SUPPLEMENT_FROM.isoformat(),
+        "supplement_to": SUPPLEMENT_TO.isoformat(),
+    }
+
+
+#: Star ratings spanning all three public-builder tiers (comfort 1-3, luxury 4,
+#: ultra 5 — see app/modules/public/estimate.py:TIER_BANDS), assigned to three
+#: of the demo properties that already carry a non-resident-priced rate.
+_PUBLIC_TIER_STARS = {
+    "acc_bb_only": 2,          # Kaskazi Guest House  -> comfort
+    "acc_sto_full_board": 4,   # Coral Sands Resort   -> luxury (the builder's default)
+    "acc_rack_discounted": 5,  # Baobab Beach Lodge   -> ultra
+}
+
+
+async def publish_public_demo(db: AsyncSession, ids: dict[str, Any]) -> None:
+    """Make the demo catalogue visible to the public site and safari builder.
+
+    ``seed_demo`` alone is not enough to see a price on ``/builder``: Stage 6.1
+    made every row land unpublished on purpose (§6.1 — "sellable is not
+    publishable"), and none of the demo properties carry a ``star_rating``,
+    which the builder's tier bands require. Both are true of any *real* fresh
+    database too, which is exactly what left the public builder blank against
+    an otherwise-correctly-migrated, otherwise-correctly-seeded dev database —
+    this closes that gap for the next person who stands one up, rather than
+    leaving it to be rediscovered by hand again.
+
+    Deliberately a separate, opt-in step (not folded into ``seed_demo``
+    itself): every existing test that calls ``seed_demo`` directly still gets
+    the same unpublished, unrated rows it always has, so this cannot change
+    what any test asserts.
+    """
+    from app.modules.accommodations.models import Accommodation
+    from app.modules.destinations.models import Destination
+    from app.modules.public.service import DESTINATION, PROPERTY, PublishService
+
+    diani_id = uuid.UUID(ids["destination_diani"])
+    diani = (
+        await db.execute(select(Destination).where(Destination.id == diani_id))
+    ).scalar_one()
+    if not (diani.description or "").strip():
+        diani.description = (
+            f"{diani.name}: a stretch of coast used by the demo catalogue to "
+            f"exercise the public site and safari builder end to end."
+        )
+
+    for key, rating in _PUBLIC_TIER_STARS.items():
+        acc = (
+            await db.execute(select(Accommodation).where(Accommodation.id == uuid.UUID(ids[key])))
+        ).scalar_one()
+        acc.star_rating = rating
+    await db.commit()
+
+    pub = PublishService(db)
+    await pub.publish(DESTINATION, diani.id)
+    for key in _PUBLIC_TIER_STARS:
+        await pub.publish(PROPERTY, uuid.UUID(ids[key]))
+
+
+async def _main() -> None:
+    uri = settings.sqlalchemy_sync_uri
+    target = uri.split("@")[-1].split("?")[0]
+    print(f"[seed_demo] target database: {target}")
+    if "--yes" not in sys.argv:
+        print(
+            "[seed_demo] refusing to run without --yes.\n"
+            "            This loads INVENTED hotel rates. Never load it into the\n"
+            "            live catalogue: a fabricated rate could reach a client."
+        )
+        raise SystemExit(1)
+    async with AsyncSessionLocal() as db:
+        ids = await seed_demo(db)
+        if "--publish" in sys.argv:
+            await publish_public_demo(db, ids)
+    print(f"[seed_demo] done — {len(ids)} reference ids available")
+    if "--publish" in sys.argv:
+        print(
+            "[seed_demo] published demo-diani + 3 demo properties "
+            "(comfort/luxury/ultra) for the public site and /builder"
+        )
+
+
+if __name__ == "__main__":
+    asyncio.run(_main())
